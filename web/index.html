@@ -34,6 +34,10 @@
   .block[data-type="code"] .text { font-family: ui-monospace, Menlo, monospace; background: #f7f6f3; padding: 12px; border-radius: 4px; font-size: 14px; }
   .block[data-type="divider"] { border-top: 1px solid var(--border); margin: 8px 0; }
   .block[data-type="to_do"] .text.completed { text-decoration: line-through; color: var(--muted); }
+  .children { margin-left: 26px; }
+  .block.collapsed > .children { display: none; }
+  .toggle-arrow { cursor: pointer; color: var(--muted); width: 18px; display: inline-block; user-select: none; }
+  .toggle-arrow:hover { color: var(--text); }
   .empty-hint { color: var(--muted); font-size: 14px; margin-top: 24px; }
 </style>
 </head>
@@ -91,13 +95,26 @@ async function openPage(id) {
   $('#title').focus();
 }
 
-function blockEl(b, idx, siblings) {
-  const prev = siblings[idx - 1], next = siblings[idx + 1];
+function blockEl(b, idx, siblings, childrenOf, depth) {
   const el = document.createElement('div');
   el.className = 'block';
   el.dataset.type = b.type;
   el.dataset.id = b.id;
+  if (depth > 0) el.style.marginLeft = (depth * 26) + 'px';
   if (b.type === 'divider') return el;
+
+  const kids = childrenOf[b.id] || [];
+
+  if (b.type === 'toggle') {
+    const tw = document.createElement('span');
+    tw.className = 'toggle-arrow';
+    tw.textContent = '▸';
+    tw.onclick = () => {
+      const collapsed = el.classList.toggle('collapsed');
+      tw.textContent = collapsed ? '▸' : '▾';
+    };
+    el.appendChild(tw);
+  }
 
   const plus = document.createElement('span');
   plus.className = 'plus'; plus.textContent = '+';
@@ -127,22 +144,42 @@ function blockEl(b, idx, siblings) {
     saveTimer = setTimeout(() => saveBlock(b.id, { text: text.textContent }), 400);
   };
   text.addEventListener('input', save);
-  text.addEventListener('keydown', (e) => onKeyDown(e, b, el, text));
+  text.addEventListener('keydown', (e) => onKeyDown(e, b, el, text, depth));
   el.appendChild(text);
+
+  // Nested children render inside a container that toggles collapse.
+  if (kids.length > 0) {
+    const kidsEl = document.createElement('div');
+    kidsEl.className = 'children';
+    kids.forEach((k, i) => kidsEl.appendChild(blockEl(k, i, kids, childrenOf, depth + 1)));
+    el.appendChild(kidsEl);
+  }
   return el;
 }
 
 function renderBlocks(blocks) {
   const container = $('#blocks');
   container.innerHTML = '';
-  const flat = flatten(blocks);
-  flat.forEach((b, i) => container.appendChild(blockEl(b, i, flat)));
-  if (flat.length === 0) container.appendChild(freshParagraph());
+  const { roots, childrenOf } = buildTree(blocks);
+  roots.forEach((b, i) => container.appendChild(blockEl(b, i, roots, childrenOf, 0)));
+  if (roots.length === 0) container.appendChild(freshParagraph());
 }
 
-function flatten(blocks) {
-  // First release: flat list of blocks per page (no nesting yet).
-  return blocks;
+function buildTree(blocks) {
+  const childrenOf = {};
+  const roots = [];
+  const byId = {};
+  blocks.forEach(b => byId[b.id] = b);
+  blocks.forEach(b => {
+    if (b.parent_id && byId[b.parent_id]) {
+      (childrenOf[b.parent_id] = childrenOf[b.parent_id] || []).push(b);
+    } else {
+      roots.push(b);
+    }
+  });
+  Object.values(childrenOf).forEach(cs => cs.sort((a, b) => a.ord - b.ord));
+  roots.sort((a, b) => a.ord - b.ord);
+  return { roots, childrenOf };
 }
 
 function freshParagraph() {
@@ -205,10 +242,16 @@ const SLASH = {
   'quote': 'quote', 'divider': 'divider', 'code': 'code', 'text': 'paragraph',
 };
 
-function onKeyDown(e, b, el, text) {
+function onKeyDown(e, b, el, text, depth) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    api.createBlock(currentPage, { type: 'paragraph', content: {} }).then(({id}) => { reopen().then(() => focusBlock(id)); });
+    // New block inherits the current parent (sibling inside same container).
+    const parentForNew = b.parent_id || null;
+    api.createBlock(currentPage, { type: 'paragraph', content: {}, parent_id: parentForNew }).then(({id}) => { reopen().then(() => focusBlock(id)); });
+  }
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    indentBlock(b, el, depth);
   }
   if (e.key === 'Backspace' && text.textContent === '') {
     e.preventDefault();
@@ -223,6 +266,22 @@ function onKeyDown(e, b, el, text) {
       changeType(b.id, match[1], text);
     }
   }
+}
+
+async function indentBlock(b, el, depth) {
+  // Find previous sibling to nest under (like Notion's Tab behavior).
+  const siblings = el.parentElement.children;
+  const myIdx = Array.from(siblings).indexOf(el);
+  if (myIdx <= 0) return; // nothing above to indent into
+  const prevEl = siblings[myIdx - 1];
+  if (!prevEl.classList.contains('block')) return;
+  const newParentId = prevEl.dataset.id;
+  if (!newParentId || newParentId === b.id) return;
+  const ok = await fetch('/api/blocks/block/' + b.id + '/move', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ parent_id: newParentId })
+  });
+  if (ok.status === 204) reopen();
 }
 
 async function changeType(id, type, textEl) {

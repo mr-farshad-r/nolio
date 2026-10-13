@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::Html,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,7 @@ pub fn router(db: Db) -> Router {
         .route("/api/pages/:id", get(get_page).patch(update_page).delete(delete_page))
         .route("/api/blocks/:page_id", get(list_blocks).post(create_block))
         .route("/api/blocks/block/:id", get(get_block).patch(update_block).delete(delete_block))
+        .route("/api/blocks/block/:id/move", post(move_block))
         .with_state(db)
 }
 
@@ -125,16 +126,17 @@ async fn list_blocks(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let conn = db.lock().await;
     let mut stmt = conn
-        .prepare("SELECT id, type, content, ord FROM block WHERE page_id = ?1 AND deleted = 0 ORDER BY ord")
+        .prepare("SELECT id, parent_id, type, content, ord FROM block WHERE page_id = ?1 AND deleted = 0 ORDER BY ord")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let blocks: Vec<serde_json::Value> = stmt
         .query_map([page_id], |row| {
-            let content: String = row.get(2)?;
+            let content: String = row.get(3)?;
             Ok(json!({
                 "id": row.get::<_, String>(0)?,
-                "type": row.get::<_, String>(1)?,
+                "parent_id": row.get::<_, Option<String>>(1)?,
+                "type": row.get::<_, String>(2)?,
                 "content": serde_json::from_str::<serde_json::Value>(&content).unwrap_or(json!({})),
-                "ord": row.get::<_, f64>(3)?,
+                "ord": row.get::<_, f64>(4)?,
             }))
         })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -152,12 +154,78 @@ async fn create_block(
     let id = uuid::Uuid::new_v4().to_string();
     let btype = body.get("type").and_then(|t| t.as_str()).unwrap_or("paragraph");
     let content = body.get("content").cloned().unwrap_or(json!({}));
+    let parent_id = body.get("parent_id").and_then(|p| p.as_str()).map(|s| s.to_string());
     conn.execute(
-        "INSERT INTO block (id, page_id, type, content) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![id, page_id, btype, content.to_string()],
+        "INSERT INTO block (id, page_id, parent_id, type, content) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![id, page_id, parent_id, btype, content.to_string()],
     )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| { eprintln!("create_block error: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
+}
+
+/// Move a block: change its parent (nesting) and/or position (ord).
+/// Rejects ancestry cycles by walking up from the proposed parent.
+async fn move_block(
+    State(db): State<Db>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<StatusCode, StatusCode> {
+    let conn = db.lock().await;
+    let new_parent: Option<String> = body
+        .get("parent_id")
+        .and_then(|p| p.as_str())
+        .map(|s| s.to_string());
+
+    // Cycle check: walk up from the new parent; if we ever reach `id`, reject.
+    if let Some(ref p) = new_parent {
+        let mut cur = Some(p.clone());
+        let mut hops = 0;
+        while let Some(node) = cur {
+            if node == id {
+                return Err(StatusCode::CONFLICT); // would create a cycle
+            }
+            if hops > 10_000 {
+                return Err(StatusCode::INTERNAL_SERVER_ERROR); // guard against corrupt data
+            }
+            cur = conn
+                .query_row(
+                    "SELECT parent_id FROM block WHERE id = ?1",
+                    [&node],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(|_| StatusCode::NOT_FOUND)?;
+            hops += 1;
+        }
+    }
+
+    // Validate new parent belongs to the same page (if provided).
+    if let Some(ref p) = new_parent {
+        let ok: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM block WHERE id = ?1 AND page_id = (SELECT page_id FROM block WHERE id = ?2)",
+                [p, &id],
+                |row| Ok(row.get::<_, i64>(0)? == 1),
+            )
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if !ok {
+            return Err(StatusCode::CONFLICT); // cross-page nesting not allowed
+        }
+    }
+
+    if let Some(ord) = body.get("ord").and_then(|o| o.as_f64()) {
+        conn.execute(
+            "UPDATE block SET parent_id = COALESCE(?2, parent_id), ord = ?3 WHERE id = ?1",
+            rusqlite::params![id, new_parent, ord],
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    } else {
+        conn.execute(
+            "UPDATE block SET parent_id = COALESCE(?2, parent_id) WHERE id = ?1",
+            rusqlite::params![id, new_parent],
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_block(
