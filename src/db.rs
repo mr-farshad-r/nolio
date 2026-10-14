@@ -27,6 +27,7 @@ pub fn init(path: &str) -> rusqlite::Result<Connection> {
             parent_id   TEXT REFERENCES page(id),
             title       TEXT NOT NULL DEFAULT '',
             icon        TEXT,
+            favorite    INTEGER NOT NULL DEFAULT 0,
             created_at  TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
             deleted     INTEGER NOT NULL DEFAULT 0
@@ -46,8 +47,37 @@ pub fn init(path: &str) -> rusqlite::Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_block_page ON block(page_id);
         CREATE INDEX IF NOT EXISTS idx_block_parent ON block(parent_id);
+
+        CREATE TABLE IF NOT EXISTS data_source (
+            id          TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            name        TEXT NOT NULL DEFAULT 'Untitled database',
+            properties  TEXT NOT NULL DEFAULT '[]',
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS row_membership (
+            data_source_id TEXT NOT NULL REFERENCES data_source(id),
+            page_id        TEXT NOT NULL REFERENCES page(id),
+            PRIMARY KEY (data_source_id, page_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS property_value (
+            data_source_id TEXT NOT NULL REFERENCES data_source(id),
+            page_id        TEXT NOT NULL REFERENCES page(id),
+            prop_id        TEXT NOT NULL,
+            value          TEXT NOT NULL DEFAULT 'null',
+            PRIMARY KEY (data_source_id, page_id, prop_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pv_ds ON property_value(data_source_id, page_id);
         "#,
     )?;
+
+    // Migration for databases created by v0.1/v0.2 (missing favorite column).
+    let _ = conn.execute_batch(
+        "ALTER TABLE page ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;",
+    );
+
     conn.execute(
         "INSERT OR IGNORE INTO workspace (id, name) VALUES ('default', 'Personal')",
         [],

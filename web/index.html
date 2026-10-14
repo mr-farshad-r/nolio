@@ -4,319 +4,56 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nolio</title>
-<style>
-  :root {
-    --bg: #ffffff; --side: #f7f7f5; --text: #37352f; --muted: #9b9a97;
-    --hover: #efefee; --accent: #2383e2; --border: #e9e9e7;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: var(--text); }
-  .app { display: grid; grid-template-columns: 240px 1fr; height: 100vh; }
-  .sidebar { background: var(--side); padding: 12px 8px; overflow-y: auto; border-right: 1px solid var(--border); }
-  .sidebar h1 { font-size: 14px; margin: 8px 10px; display: flex; justify-content: space-between; align-items: center; }
-  .sidebar h1 button { border: 0; background: transparent; cursor: pointer; font-size: 16px; color: var(--muted); }
-  .page-item { padding: 4px 10px; border-radius: 4px; font-size: 14px; cursor: pointer; color: var(--muted); }
-  .page-item:hover, .page-item.active { background: var(--hover); color: var(--text); }
-  .main { display: flex; flex-direction: column; overflow-y: auto; }
-  .content { width: 100%; max-width: 720px; margin: 60px auto; padding: 0 24px; }
-  #title { font-size: 40px; font-weight: 700; border: 0; outline: 0; width: 100%; font-family: inherit; color: var(--text); }
-  #title::placeholder { color: #d3d1cb; }
-  .block { display: flex; align-items: flex-start; padding: 2px 0; }
-  .block .plus { visibility: hidden; color: var(--muted); cursor: pointer; padding: 2px 6px; user-select: none; }
-  .block:hover .plus { visibility: visible; }
-  .block .text { flex: 1; outline: 0; min-height: 1.4em; font-size: 16px; line-height: 1.5; padding: 3px 2px; }
-  .block .text:empty::before { content: attr(data-placeholder); color: #d3d1cb; }
-  .block[data-type="heading_1"] .text { font-size: 30px; font-weight: 600; }
-  .block[data-type="heading_2"] .text { font-size: 24px; font-weight: 600; }
-  .block[data-type="heading_3"] .text { font-size: 20px; font-weight: 600; }
-  .block[data-type="bulleted_list"] .text::before { content: "•"; margin-right: 8px; color: var(--muted); }
-  .block[data-type="quote"] .text { border-left: 3px solid var(--text); padding-left: 12px; }
-  .block[data-type="code"] .text { font-family: ui-monospace, Menlo, monospace; background: #f7f6f3; padding: 12px; border-radius: 4px; font-size: 14px; }
-  .block[data-type="divider"] { border-top: 1px solid var(--border); margin: 8px 0; }
-  .block[data-type="to_do"] .text.completed { text-decoration: line-through; color: var(--muted); }
-  .children { margin-left: 26px; }
-  .block.collapsed > .children { display: none; }
-  .toggle-arrow { cursor: pointer; color: var(--muted); width: 18px; display: inline-block; user-select: none; }
-  .toggle-arrow:hover { color: var(--text); }
-  .empty-hint { color: var(--muted); font-size: 14px; margin-top: 24px; }
-</style>
+<link rel="stylesheet" href="app.css">
 </head>
 <body>
-<div class="app">
+<div id="app" class="app">
   <nav class="sidebar">
-    <h1>Nolio <button id="new-page" title="New page">+</button></h1>
-    <div id="pages"></div>
+    <div class="sb-top">
+      <span class="sb-workspace">Nolio</span>
+      <button class="sb-icon-btn" id="new-page" title="New page">＋</button>
+    </div>
+    <div class="sb-search"><input id="search" placeholder="Search" autocomplete="off"></div>
+    <div id="favorites" class="sb-section" hidden>
+      <div class="sb-section-label">Favorites</div>
+      <div id="fav-tree" class="sb-tree"></div>
+    </div>
+    <div class="sb-section">
+      <div class="sb-section-label">Private</div>
+      <div id="page-tree" class="sb-tree"></div>
+    </div>
   </nav>
-  <main class="main">
-    <div class="content">
+  <main class="main" id="main">
+    <div class="content" id="page-view">
       <input id="title" placeholder="Untitled" autocomplete="off">
       <div id="blocks"></div>
-      <p class="empty-hint">Type <b>/</b> for commands. Enter creates a block, Backspace at start merges/removes.</p>
+      <p class="empty-hint">Type <b>/</b> for commands. Tab to nest. Select text to format.</p>
+    </div>
+    <div class="content wide" id="db-view" hidden>
+      <div class="db-head">
+        <input id="db-title" placeholder="Untitled database" autocomplete="off">
+        <div class="db-views">
+          <button class="view-tab" data-view="table">Table</button>
+          <button class="view-tab" data-view="board">Board</button>
+          <button class="view-tab" data-view="list">List</button>
+        </div>
+      </div>
+      <div id="db-body"></div>
     </div>
   </main>
 </div>
-<script>
-const $ = (s, el=document) => el.querySelector(s);
-const api = {
-  pages: () => fetch('/api/pages').then(r => r.json()),
-  createPage: (body) => fetch('/api/pages', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(r => r.json()),
-  updatePage: (id, body) => fetch('/api/pages/' + id, { method: 'PATCH', ...json(body) }),
-  blocks: (pid) => fetch('/api/blocks/' + pid).then(r => r.json()),
-  createBlock: (pid, body) => fetch('/api/blocks/' + pid, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(r => r.json()),
-  updateBlock: (id, body) => fetch('/api/blocks/block/' + id, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }),
-  deleteBlock: (id) => fetch('/api/blocks/block/' + id, { method: 'DELETE' }),
-};
-const json = (body) => ({ headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
 
-let currentPage = null;
-let pages = [];
+<div id="slash-menu" class="menu" hidden></div>
+<div id="format-bar" class="menu fmt" hidden>
+  <button data-fmt="bold" title="Bold (⌘B)"><b>B</b></button>
+  <button data-fmt="italic" title="Italic (⌘I)"><i>I</i></button>
+  <button data-fmt="underline" title="Underline (⌘U)"><u>U</u></button>
+  <button data-fmt="strikeThrough" title="Strikethrough"><s>S</s></button>
+  <button data-fmt="code" title="Inline code"><code>&lt;&gt;</code></button>
+</div>
+<div id="cell-menu" class="menu" hidden></div>
+<div id="prop-menu" class="menu" hidden></div>
 
-async function refreshSidebar(activeId) {
-  pages = await api.pages();
-  $('#pages').innerHTML = '';
-  for (const p of pages) {
-    const el = document.createElement('div');
-    el.className = 'page-item' + (p.id === activeId ? ' active' : '');
-    el.textContent = (p.icon ? p.icon + ' ' : '') + (p.title || 'Untitled');
-    el.onclick = () => openPage(p.id);
-    $('#pages').appendChild(el);
-  }
-}
-
-async function openPage(id) {
-  currentPage = id;
-  const [meta, blocks] = await Promise.all([
-    pages.find(p => p.id === id) || fetch('/api/pages/' + id).then(r => r.json()),
-    api.blocks(id),
-  ]);
-  $('#title').value = meta.title || '';
-  renderBlocks(blocks);
-  refreshSidebar(id);
-  $('#title').focus();
-}
-
-function blockEl(b, idx, siblings, childrenOf, depth) {
-  const el = document.createElement('div');
-  el.className = 'block';
-  el.dataset.type = b.type;
-  el.dataset.id = b.id;
-  if (depth > 0) el.style.marginLeft = (depth * 26) + 'px';
-  if (b.type === 'divider') return el;
-
-  const kids = childrenOf[b.id] || [];
-
-  if (b.type === 'toggle') {
-    const tw = document.createElement('span');
-    tw.className = 'toggle-arrow';
-    tw.textContent = '▸';
-    tw.onclick = () => {
-      const collapsed = el.classList.toggle('collapsed');
-      tw.textContent = collapsed ? '▸' : '▾';
-    };
-    el.appendChild(tw);
-  }
-
-  const plus = document.createElement('span');
-  plus.className = 'plus'; plus.textContent = '+';
-  plus.onclick = () => insertAfter(b.id);
-  el.appendChild(plus);
-
-  const text = document.createElement('div');
-  text.className = 'text';
-  text.contentEditable = 'true';
-  text.dataset.placeholder = "Type '/' for commands";
-  text.textContent = b.content.text || '';
-
-  if (b.type === 'to_do') {
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = !!b.content.checked;
-    cb.onchange = () => {
-      text.classList.toggle('completed', cb.checked);
-      saveBlock(b.id, { checked: cb.checked });
-    };
-    el.appendChild(cb);
-  }
-
-  let saveTimer;
-  const save = () => {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => saveBlock(b.id, { text: text.textContent }), 400);
-  };
-  text.addEventListener('input', save);
-  text.addEventListener('keydown', (e) => onKeyDown(e, b, el, text, depth));
-  el.appendChild(text);
-
-  // Nested children render inside a container that toggles collapse.
-  if (kids.length > 0) {
-    const kidsEl = document.createElement('div');
-    kidsEl.className = 'children';
-    kids.forEach((k, i) => kidsEl.appendChild(blockEl(k, i, kids, childrenOf, depth + 1)));
-    el.appendChild(kidsEl);
-  }
-  return el;
-}
-
-function renderBlocks(blocks) {
-  const container = $('#blocks');
-  container.innerHTML = '';
-  const { roots, childrenOf } = buildTree(blocks);
-  roots.forEach((b, i) => container.appendChild(blockEl(b, i, roots, childrenOf, 0)));
-  if (roots.length === 0) container.appendChild(freshParagraph());
-}
-
-function buildTree(blocks) {
-  const childrenOf = {};
-  const roots = [];
-  const byId = {};
-  blocks.forEach(b => byId[b.id] = b);
-  blocks.forEach(b => {
-    if (b.parent_id && byId[b.parent_id]) {
-      (childrenOf[b.parent_id] = childrenOf[b.parent_id] || []).push(b);
-    } else {
-      roots.push(b);
-    }
-  });
-  Object.values(childrenOf).forEach(cs => cs.sort((a, b) => a.ord - b.ord));
-  roots.sort((a, b) => a.ord - b.ord);
-  return { roots, childrenOf };
-}
-
-function freshParagraph() {
-  const el = document.createElement('div');
-  el.className = 'block'; el.dataset.type = 'paragraph';
-  const plus = document.createElement('span'); plus.className = 'plus'; plus.textContent = '+';
-  const text = document.createElement('div');
-  text.className = 'text'; text.contentEditable = 'true';
-  text.dataset.placeholder = "Type '/' for commands";
-  text.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); createFromEmpty(text); }
-  });
-  text.addEventListener('blur', () => { if (text.textContent.trim()) createFromEmpty(text); });
-  el.appendChild(plus); el.appendChild(text);
-  return el;
-}
-
-async function createFromEmpty(textEl) {
-  if (!currentPage || !textEl.textContent.trim()) return;
-  const { id } = await api.createBlock(currentPage, { type: 'paragraph', content: { text: textEl.textContent } });
-  textEl.removeEventListener('blur', createFromEmpty);
-  await reopen();
-  focusBlock(id);
-}
-
-async function insertAfter(blockId) {
-  // Append a new block at the end for now; drag-reorder comes later.
-  const { id } = await api.createBlock(currentPage, { type: 'paragraph', content: {} });
-  await reopen();
-  focusBlock(id);
-}
-
-async function reopen() {
-  const blocks = await api.blocks(currentPage);
-  renderBlocks(blocks);
-  refreshSidebar(currentPage);
-}
-
-function focusBlock(id) {
-  const el = document.querySelector('.block[data-id="' + id + '"] .text');
-  if (el) el.focus();
-}
-
-async function saveBlock(id, patch) {
-  const el = document.querySelector('.block[data-id="' + id + '"]');
-  const current = el ? { text: el.querySelector('.text').textContent } : {};
-  await api.updateBlock(id, { content: { ...current, ...patch } });
-  if (patch.text !== undefined && currentPage) refreshSidebarTitle();
-}
-
-function refreshSidebarTitle() {
-  const active = pages.find(p => p.id === currentPage);
-  if (active) active.title = $('#title').value;
-  refreshSidebar(currentPage);
-}
-
-const SLASH = {
-  'heading 1': 'heading_1', 'heading 2': 'heading_2', 'heading 3': 'heading_3',
-  'bulleted list': 'bulleted_list', 'to-do list': 'to_do', 'toggle': 'toggle',
-  'quote': 'quote', 'divider': 'divider', 'code': 'code', 'text': 'paragraph',
-};
-
-function onKeyDown(e, b, el, text, depth) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    // New block inherits the current parent (sibling inside same container).
-    const parentForNew = b.parent_id || null;
-    api.createBlock(currentPage, { type: 'paragraph', content: {}, parent_id: parentForNew }).then(({id}) => { reopen().then(() => focusBlock(id)); });
-  }
-  if (e.key === 'Tab') {
-    e.preventDefault();
-    indentBlock(b, el, depth);
-  }
-  if (e.key === 'Backspace' && text.textContent === '') {
-    e.preventDefault();
-    api.deleteBlock(b.id).then(reopen);
-  }
-  const s = text.textContent.trim().toLowerCase();
-  if (s.startsWith('/')) {
-    const cmd = s.slice(1);
-    const match = Object.entries(SLASH).find(([name]) => name.startsWith(cmd));
-    if (match && (e.key === 'Enter' || e.key === ' ')) {
-      e.preventDefault();
-      changeType(b.id, match[1], text);
-    }
-  }
-}
-
-async function indentBlock(b, el, depth) {
-  // Find previous sibling to nest under (like Notion's Tab behavior).
-  const siblings = el.parentElement.children;
-  const myIdx = Array.from(siblings).indexOf(el);
-  if (myIdx <= 0) return; // nothing above to indent into
-  const prevEl = siblings[myIdx - 1];
-  if (!prevEl.classList.contains('block')) return;
-  const newParentId = prevEl.dataset.id;
-  if (!newParentId || newParentId === b.id) return;
-  const ok = await fetch('/api/blocks/block/' + b.id + '/move', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ parent_id: newParentId })
-  });
-  if (ok.status === 204) reopen();
-}
-
-async function changeType(id, type, textEl) {
-  await api.updateBlock(id, { type });
-  await reopen();
-  const el = document.querySelector('.block[data-id="' + id + '"] .text');
-  if (el) { el.focus(); }
-}
-
-async function saveBlockType(id, type) { await api.updateBlock(id, { type }); }
-
-$('#new-page').onclick = async () => {
-  const { id } = await api.createPage({ title: '' });
-  await refreshSidebar();
-  openPage(id);
-};
-
-let titleTimer;
-$('#title').addEventListener('input', () => {
-  clearTimeout(titleTimer);
-  titleTimer = setTimeout(() => {
-    if (currentPage) api.updatePage(currentPage, { title: $('#title').value }).then(() => refreshSidebar(currentPage));
-  }, 400);
-});
-
-(async () => {
-  await refreshSidebar();
-  const first = pages[0];
-  if (first) openPage(first.id);
-  else {
-    const { id } = await api.createPage({ title: 'Getting started' });
-    await refreshSidebar();
-    openPage(id);
-  }
-})();
-</script>
+<script src="app.js"></script>
 </body>
 </html>
